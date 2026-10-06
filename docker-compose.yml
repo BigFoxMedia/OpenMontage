@@ -1,0 +1,42 @@
+# OpenMontage — Coolify-managed deployment (Kleiner homelab, lxc-147).
+#
+# Secrets (OPENAI_API_KEY / provider keys) are injected by Coolify via the
+# application env API and land in .env at deploy time — NEVER hardcode them
+# in this file.
+#
+# Routing: Traefik labels are self-declared because git-sourced compose apps
+# are deployed as-is (Coolify adds coolify.* labels + network, not routers).
+# The host's coolify-proxy watches the docker socket, so no
+# traefik.docker.network pin is needed.
+services:
+  backlot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "4750:4750"
+    environment:
+      BACKLOT_PORT: "4750"
+      # OpenAI-compatible LLM (LiteLLM gateway) for any direct openai-SDK calls
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+    volumes:
+      - projects:/app/projects
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.middlewares.gzip.compress=true
+      - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
+      - traefik.http.routers.openmontage-http.entryPoints=http
+      - traefik.http.routers.openmontage-http.middlewares=redirect-to-https
+      - 'traefik.http.routers.openmontage-http.rule=Host(`openmontage.coolify-web.enpraise.com`) && PathPrefix(`/`)'
+      - traefik.http.routers.openmontage-https.entryPoints=https
+      - traefik.http.routers.openmontage-https.middlewares=gzip
+      - 'traefik.http.routers.openmontage-https.rule=Host(`openmontage.coolify-web.enpraise.com`) && PathPrefix(`/`)'
+      - traefik.http.routers.openmontage-https.tls=true
+      - traefik.http.routers.openmontage-https.tls.certresolver=letsencrypt
+      - traefik.http.services.openmontage-http.loadbalancer.server.port=4750
+      - traefik.http.services.openmontage-https.loadbalancer.server.port=4750
+
+volumes:
+  projects:

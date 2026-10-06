@@ -1,8 +1,8 @@
 # OpenMontage - Global Configuration
 
 llm:
-  provider: anthropic            # anthropic | openai | gemini | openrouter | ollama | mistral | minimax
-  model: null                    # null = use provider default
+  provider: openai               # anthropic | openai | gemini | openrouter | ollama | mistral | minimax
+  model: qwen3.8-27B             # via the homelab LiteLLM gateway (OPENAI_BASE_URL / OPENAI_API_KEY env)
   temperature: 0.7
   max_tokens: 4096
 
