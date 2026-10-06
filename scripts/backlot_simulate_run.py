@@ -94,6 +94,15 @@ def main() -> int:
     brief["topic"] = "The Last Lighthouse"
     cp("research", "completed", {"research_brief": brief})
 
+    # proposal gate (required before script): the upstream demo driver omitted this stage,
+    # so a run stopped here with a PREREQUISITE VIOLATION. Emit a schema-valid packet.
+    cp("proposal", "in_progress", {})
+    prop = sample_artifact("proposal_packet")
+    save_artifact("proposal_packet", prop)
+    cp("proposal", "awaiting_human", {"proposal_packet": prop})
+    time.sleep(wait)
+    cp("proposal", "completed", {"proposal_packet": prop}, human_approved=True)
+
     # script gates: awaiting_human -> approved
     cp("script", "in_progress", {})
     save_artifact("script", art["script"])
