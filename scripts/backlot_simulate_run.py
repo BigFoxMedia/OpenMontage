@@ -5,6 +5,9 @@ in_progress checkpoints, gated awaiting_human states, tool events,
 progressively-written artifacts — so the board can be watched updating live.
 Also useful as a demo driver.
 
+Runs all eight cinematic stages through the publish gate and composes a real
+`renders/final.mp4` from the generated scene frames using the image's ffmpeg.
+
     python scripts/backlot_simulate_run.py [--project backlot-demo-run]
         [--fast] [--cleanup]
 
@@ -17,8 +20,10 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -98,6 +103,9 @@ def main() -> int:
     # so a run stopped here with a PREREQUISITE VIOLATION. Emit a schema-valid packet.
     cp("proposal", "in_progress", {})
     prop = sample_artifact("proposal_packet")
+    # Lock the runtime this sim actually renders with; a mismatch between
+    # proposal and edit_decisions is a "silent swap" governance flag.
+    prop["production_plan"]["render_runtime"] = "ffmpeg"
     save_artifact("proposal_packet", prop)
     cp("proposal", "awaiting_human", {"proposal_packet": prop})
     time.sleep(wait)
@@ -158,6 +166,128 @@ def main() -> int:
                       "budget_remaining_usd": 5 - manifest["total_cost_usd"]})
     time.sleep(wait)
     cp("assets", "completed", {"asset_manifest": manifest}, human_approved=True)
+
+    # edit: carries the runtime locked at proposal forward unchanged
+    cp("edit", "in_progress", {})
+    edit_decisions = {
+        "version": "1.0",
+        "render_runtime": "ffmpeg",
+        "cuts": [
+            {"id": sid, "source": f"img_{sid}", "in_seconds": s0, "out_seconds": s1,
+             "reason": narration}
+            for (sid, _desc, s0, s1, narration) in SCENES
+        ],
+    }
+    save_artifact("edit_decisions", edit_decisions)
+    cp("edit", "completed", {"edit_decisions": edit_decisions})
+
+    # compose: render a real final.mp4 from the scene frames (ffmpeg ships in
+    # the image) and validate it with ffprobe — the stage's success criterion
+    cp("compose", "in_progress", {})
+    emit_event(pdir, {"tool": "video_compose", "event": "start", "scene_id": "all"})
+    renders_dir = pdir / "renders"
+    renders_dir.mkdir(exist_ok=True)
+    t0 = time.time()
+    ffmpeg_args = []
+    for (sid, _desc, s0, s1, _n) in SCENES:
+        ffmpeg_args += ["-loop", "1", "-t", str(s1 - s0), "-i",
+                        str(pdir / "assets" / "images" / f"{sid}.png")]
+    subprocess.run(
+        ["ffmpeg", "-y", *ffmpeg_args,
+         "-filter_complex",
+         "[0:v]fps=24,format=yuv420p[v0];[1:v]fps=24,format=yuv420p[v1];"
+         "[2:v]fps=24,format=yuv420p[v2];[3:v]fps=24,format=yuv420p[v3];"
+         "[v0][v1][v2][v3]concat=n=4:v=1:a=0",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-an",
+         str(renders_dir / "final.mp4")],
+        check=True, capture_output=True)
+    emit_event(pdir, {"tool": "video_compose", "event": "finish", "scene_id": "all",
+                      "success": True, "duration_s": round(time.time() - t0, 2),
+                      "output_path": "renders/final.mp4"})
+    probe = json.loads(subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json",
+         "-show_format", "-show_streams", str(renders_dir / "final.mp4")],
+        check=True, capture_output=True).stdout)
+    vstream = next(s for s in probe["streams"] if s["codec_type"] == "video")
+    num, _, den = vstream["r_frame_rate"].partition("/")
+    fps = int(num) / max(int(den or 1), 1)
+    duration = round(float(probe["format"]["duration"]), 3)
+    render_report = {
+        "version": "1.0",
+        "outputs": [
+            {"path": "renders/final.mp4", "format": "mp4",
+             "resolution": f"{vstream['width']}x{vstream['height']}",
+             "duration_seconds": duration},
+        ],
+    }
+    save_artifact("render_report", render_report)
+    frame_paths = [f"assets/images/{sid}.png" for (sid, *_r) in SCENES]
+    final_review = {
+        "version": "1.0",
+        "output_path": "renders/final.mp4",
+        "status": "pass",
+        "checks": {
+            "technical_probe": {
+                "valid_container": True, "duration_seconds": duration,
+                "resolution": f"{vstream['width']}x{vstream['height']}",
+                "fps": fps, "has_audio": False,
+                "codec": vstream.get("codec_name", "h264"),
+                "file_size_bytes": (renders_dir / "final.mp4").stat().st_size,
+                "issues": [],
+            },
+            "visual_spotcheck": {
+                "frames_sampled": len(frame_paths),
+                "frame_paths": frame_paths,
+                "black_frames_detected": False, "broken_overlays": False,
+                "missing_assets": False, "unreadable_text": False, "issues": [],
+            },
+            "audio_spotcheck": {
+                "narration_present": False, "music_present": False,
+                "unexpected_silence": True, "clipping_detected": False,
+                "mix_intelligible": False,
+                "issues": ["sim run generated video only (no TTS/music assets)"],
+            },
+            "promise_preservation": {
+                "delivery_promise_honored": True,
+                "renderer_family_used": "ffmpeg",
+                "render_runtime_used": "ffmpeg",
+                "runtime_swap_detected": False,
+                "runtime_swap_check": "ok — ffmpeg executed as locked at proposal",
+                "silent_downgrade_detected": False, "issues": [],
+            },
+            "subtitle_check": {
+                "subtitles_expected": False, "subtitles_present": False,
+                "coverage_ratio": 1.0, "timing_drift_detected": False, "issues": [],
+            },
+        },
+        "issues_found": ["No audio track: demo run generated images only."],
+        "recommended_action": "present_to_user",
+    }
+    save_artifact("final_review", final_review)
+    cp("compose", "completed", {"render_report": render_report, "final_review": final_review})
+
+    # publish gate (final human approval)
+    cp("publish", "in_progress", {})
+    publish_log = {
+        "version": "1.0",
+        "entries": [
+            {
+                "platform": "local",
+                "status": "exported",
+                "export_path": "renders/final.mp4",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "metadata_used": {
+                    "title": "The Last Lighthouse",
+                    "description": "21-second cinematic demo run of the Backlot pipeline.",
+                    "hashtags": ["backlot", "openmontage", "demo"],
+                },
+            }
+        ],
+    }
+    save_artifact("publish_log", publish_log)
+    cp("publish", "awaiting_human", {"publish_log": publish_log})
+    time.sleep(wait)
+    cp("publish", "completed", {"publish_log": publish_log}, human_approved=True)
 
     print(f"[sim] done — board at http://127.0.0.1:4750/p/{pid}")
     if args.cleanup:

@@ -22,7 +22,12 @@ WORKDIR /app
 # Makefile treats it as optional too). GPU reqs intentionally excluded — this
 # host has no GPU passthrough.
 COPY requirements.txt .
+# pytest: the demo driver (scripts/backlot_simulate_run.py) imports the
+# contract fixtures from tests/, so the deployed image needs it at runtime —
+# baked in so the demo works out of the box (previously required a manual
+# `pip install pytest` inside the container, which a redeploy wiped).
 RUN pip install -r requirements.txt \
+    && pip install pytest \
     && (pip install piper-tts || echo "[skip] piper-tts unavailable - TTS falls back to cloud providers")
 
 COPY . .
